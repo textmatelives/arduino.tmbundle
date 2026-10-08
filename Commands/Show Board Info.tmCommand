@@ -3,23 +3,20 @@
 <plist version="1.0">
 <dict>
 	<key>beforeRunningCommand</key>
-	<string>saveModifiedFiles</string>
+	<string>nop</string>
 	<key>command</key>
-	<string>#!/bin/bash
-[ -n "$TM_FILEPATH" ] || { echo "Save the sketch first"; exit 1; }
-"$TM_BUNDLE_SUPPORT/bin/arduino-build" asm "${TM_FILEPATH%/*}"
+	<string># Diagnostics window: what the next build and monitor will use, and why.
+"$TM_BUNDLE_SUPPORT/bin/arduino-build" info --html "$TM_DIRECTORY"
 </string>
 	<key>input</key>
 	<string>none</string>
-	<key>keyEquivalent</key>
-	<string>@B</string>
 	<key>name</key>
-	<string>Show Assembly</string>
+	<string>Show Board Info</string>
 	<key>output</key>
-	<string>openAsNewDocument</string>
+	<string>showAsHTML</string>
 	<key>scope</key>
 	<string>source.c++.arduino</string>
 	<key>uuid</key>
-	<string>6CD0AE16-8CB5-4019-82D6-39C45933A5E9</string>
+	<string>9AAB8F96-9D7E-43B4-9018-F1175FBF8F6A</string>
 </dict>
 </plist>

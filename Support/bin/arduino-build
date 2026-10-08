@@ -1,0 +1,669 @@
+#!/bin/bash
+# arduino-build: build backend for the Arduino TextMate bundle.
+#
+# Default backend is arduino-cli. TM_ARDUINO_BUILDER selects alternatives;
+# "idf" (ESP-IDF idf.py) is the planned second backend -- the dispatch below
+# is the seam, only arduino-cli is implemented today.
+#
+# User settings (TextMate Shell Variables, all optional):
+#   TM_ARDUINO_FQBN    board, e.g. esp32:esp32:esp32 or arduino:avr:uno
+#   TM_ARDUINO_PORT    serial port, e.g. /dev/cu.usbmodem1101
+#   TM_ARDUINO_BAUD    monitor baud rate (default 115200)
+# Unset values are auto-detected from the connected boards.
+#
+# Verbs: compile|upload|clean|detect|monitor|asm|libraries-dir|cli SKETCHDIR
+
+set -u
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+fail() { echo "arduino-build: $*" >&2; exit 1; }
+
+BUILDER="${TM_ARDUINO_BUILDER:-arduino-cli}"
+case "$BUILDER" in
+	arduino-cli) ;;
+	idf) fail "idf.py backend is not implemented yet (want it? see issue #2)" ;;
+	*) fail "unknown TM_ARDUINO_BUILDER '$BUILDER' (want 'arduino-cli')" ;;
+esac
+
+CLI="${ARDUINO_CLI:-$(command -v arduino-cli)}" || true
+BREW="${BREW_BIN:-$(command -v brew)}" || true
+# Every verb needs the CLI except doctor (which installs it). Called once in
+# main() so the failure stays identical for all other verbs.
+need_cli() {
+	if [ -z "$CLI" ] || [ ! -x "$CLI" ]; then
+		if [ -n "$BREW" ] && [ -x "$BREW" ]; then
+			fail "arduino-cli not found. Install it: brew install arduino-cli"
+		else
+			fail "arduino-cli not found. Install Homebrew from https://brew.sh, then run: brew install arduino-cli"
+		fi
+	fi
+}
+CACHE_DIR="${ARDUINO_CACHE_DIR:-/tmp}"
+
+# Full `board listall` JSON, cached. Valid while newer than the installed
+# cores and package index, so core installs/updates invalidate it. Falls
+# back to stale cache when the CLI fails.
+listall_json() {
+	mkdir -p "$CACHE_DIR"
+	C="$CACHE_DIR/arduino-listall-cache.json"
+	PKG="$HOME/Library/Arduino15/packages"
+	IDX="$HOME/Library/Arduino15/package_index.json"
+	if [ ! -f "$C" ] || { [ -d "$PKG" ] && [ "$PKG" -nt "$C" ]; } || { [ -f "$IDX" ] && [ "$IDX" -nt "$C" ]; }; then
+		"$CLI" board listall --format json > "$C.tmp" 2>/dev/null && mv "$C.tmp" "$C" || rm -f "$C.tmp"
+	fi
+	[ -f "$C" ] && cat "$C" || fail "'arduino-cli board listall' failed"
+}
+PY="$(command -v python3)" || fail "python3 not found (macOS ships it -- is PATH broken?)"
+
+# Prints PORT=... and FQBN=... for eval. Auto-picks only when the detected
+# board is unambiguous and buildable; otherwise fails LOUD with the fix.
+# An explicit TM_ARDUINO_FQBN is always trusted. USB serial ports matching
+# no known board (clone chips with blank IDs) count as unrecognized hardware,
+# never as "nothing plugged in".
+resolve() {
+	# Fully configured: trust it, skip the ~1.5s hardware scan.
+	if [ -n "${TM_ARDUINO_FQBN:-}" ] && [ -n "${TM_ARDUINO_PORT:-}" ]; then
+		echo "PORT=${TM_ARDUINO_PORT}"
+		echo "FQBN=${TM_ARDUINO_FQBN}"
+		return 0
+	fi
+	JSON="$("$CLI" board list --format json 2>/dev/null)" || fail "'arduino-cli board list' failed"
+	KNOWN_FQBNS="$(listall_json | "$PY" -c 'import json, sys; print("\n".join(sorted(b["fqbn"] for b in json.load(sys.stdin)["boards"])))')" || fail "'arduino-cli board listall' failed"
+	BOARD_NAMES="$(listall_json | "$PY" -c 'import json, sys; print("\n".join("%s|%s" % (b["fqbn"], b["name"]) for b in json.load(sys.stdin)["boards"]))')" || fail "'arduino-cli board listall' failed"
+	WANT_FQBN="${TM_ARDUINO_FQBN:-}" WANT_PORT="${TM_ARDUINO_PORT:-}" KNOWN_FQBNS="$KNOWN_FQBNS" BOARD_NAMES="$BOARD_NAMES" "$PY" -c '
+import json, os, sys
+want_fqbn, want_port = os.environ["WANT_FQBN"], os.environ["WANT_PORT"]
+try:
+    ports = json.loads(sys.stdin.read())["detected_ports"]
+except (ValueError, KeyError):
+    sys.exit("arduino-build: board list returned unparsable JSON")
+known = set(os.environ["KNOWN_FQBNS"].split())
+names = dict(l.split("|", 1) for l in os.environ["BOARD_NAMES"].splitlines() if "|" in l)
+cands = []  # (address, fqbn, known, detected_name)
+unmatched = []  # USB serial addrs matching nothing (blank-ID clones)
+for p in ports:
+    addr = p["port"]["address"]
+    bs = p.get("matching_boards", [])
+    if not bs and "USB" in p.get("port", {}).get("protocol_label", ""):
+        unmatched.append(addr)
+    if want_port and addr != want_port:
+        continue
+    for b in bs:
+        cands.append((addr, b["fqbn"], b["fqbn"] in known, b.get("name", "")))
+if want_port:
+    unmatched = [a for a in unmatched if a == want_port]
+    if not cands and want_port not in unmatched:
+        sys.exit("arduino-build: no known board on %s (is TM_ARDUINO_PORT right?)" % want_port)
+    if not cands:  # configured port is unrecognized hardware: needs a board pick
+        sys.exit("arduino-build: cannot tell which board is on %s. Run Bundles > Arduino > Select Board and pick yours." % want_port)
+if not cands and not unmatched:
+    sys.exit("arduino-build: no boards detected (plug one in, then run Select Board to pick it)")
+if not cands:  # unrecognized USB only
+    if want_fqbn and len(unmatched) == 1:
+        print("PORT=%s\nFQBN=%s" % (unmatched[0], want_fqbn))
+        sys.exit()
+    if want_fqbn:
+        sys.exit("arduino-build: more than one unrecognized USB device (%s). Unplug all but your board and try again." % ", ".join(unmatched))
+    sys.exit("arduino-build: something is plugged in on %s, but I do not recognize it. Run Bundles > Arduino > Select Board and pick your board by name." % ", ".join(unmatched))
+if want_fqbn:
+    addrs = [a for a, f, k, d in cands if f == want_fqbn]
+    if not addrs and len(unmatched) == 1:
+        addrs = unmatched
+    if not addrs and len(unmatched) > 1:
+        sys.exit("arduino-build: more than one unrecognized USB device (%s). Unplug all but your board and try again." % ", ".join(unmatched))
+    print("PORT=%s\nFQBN=%s" % ((addrs or [cands[0][0]])[0], want_fqbn))
+    sys.exit()
+def show(fqbn):
+    if fqbn in names:
+        return names[fqbn]
+    det = next((d for a, f, k, d in cands if f == fqbn), "")
+    return det or fqbn
+known_fqbns = sorted(set(f for a, f, k, d in cands if k))
+aliases = sorted(set(f for a, f, k, d in cands if not k))
+if len(known_fqbns) == 1 and not aliases and not unmatched:
+    addr = next(a for a, f, k, d in cands if f == known_fqbns[0])
+    print("PORT=%s\nFQBN=%s" % (addr, known_fqbns[0]))
+    sys.exit()
+guesses = [show(f) for f in known_fqbns + aliases]
+guesses += ["unrecognized USB on %s" % a for a in unmatched]
+sys.exit("arduino-build: cannot tell which board is plugged in (looks like: %s). Run Bundles > Arduino > Select Board and pick yours from the menu." % ", ".join(guesses))
+' <<<"$JSON"
+}
+
+resolved() { R="$(resolve)" || exit 1; eval "$R"; }
+
+# sketch.yaml readers. The CLI owns this schema; we read only the flat keys
+# `board attach` writes plus the monitor baudrate block.
+yaml_val() { grep -E "^$2:[[:space:]]*" "$1/sketch.yaml" 2>/dev/null | head -1 | sed -E 's/^[^:]+:[[:space:]]*//'; }
+yaml_baud() {
+	"$PY" - "$1/sketch.yaml" <<'EOF' 2>/dev/null
+import re, sys
+try:
+    s = open(sys.argv[1]).read()
+except OSError:
+    sys.exit(1)
+m = re.search(r'(?m)^default_port_config:\n((?:[ \t]+.*\n)*)', s)
+if m:
+    b = re.search(r'(?m)^[ \t]*baudrate:[ \t]*([0-9]+)', m.group(1))
+    if b:
+        print(b.group(1))
+EOF
+}
+fqbn_base() { echo "$1" | cut -d: -f1-3; }  # strip :UploadSpeed=... style options
+
+# 0 iff CMDLINE is our monitor holding PORT. Pure predicate (tested).
+is_our_monitor_cmd() {
+	case "$1" in *"monitor -p $2"*) return 0;; *) return 1;; esac
+}
+
+# Free PORT for upload: close our own monitor if it holds it (verified by
+# PID file + command line), then fail loud on any remaining (strange) holder.
+free_port() {
+	PF="/tmp/arduino-tmbundle-monitor.$(basename "$1").pid"
+	if [ -f "$PF" ]; then
+		MPID="$(cat "$PF" 2>/dev/null)"
+		if [ -n "$MPID" ] && is_our_monitor_cmd "$(ps -p "$MPID" -o command= 2>/dev/null)" "$1"; then
+			echo "Closing our serial monitor (pid $MPID)..."
+			kill "$MPID" 2>/dev/null
+			for _ in 1 2 3 4 5 6 7 8; do kill -0 "$MPID" 2>/dev/null || break; sleep 0.25; done
+			kill -9 "$MPID" 2>/dev/null
+			rm -f "$PF"
+		fi
+	fi
+	STILL="$(lsof -t "$1" 2>/dev/null || true)"
+	[ -n "$STILL" ] && fail "$1 is busy (held by pid $(echo "$STILL" | tr '\n' ' ')-- close it and upload again)"
+	return 0
+}
+sketch_baud() { grep -Eho 'Serial\.begin\([0-9]+' "$1"/*.ino 2>/dev/null | head -1 | grep -Eo '[0-9]+'; }
+
+# Run "$@" (stdio inherited, streamed live) with a sign-of-life line every
+# HEARTBEAT_SECS (default 10) while it runs. Exit status is the command's.
+with_heartbeat() {
+	HB_MSG="$1"; shift
+	HB_SECS="${HEARTBEAT_SECS:-10}"
+	"$@" & HPID=$!
+	SEC=0
+	while kill -0 "$HPID" 2>/dev/null; do
+		sleep "$HB_SECS" || break
+		kill -0 "$HPID" 2>/dev/null || break
+		SEC=$((SEC + HB_SECS))
+		echo "...still $HB_MSG (${SEC}s)..."
+	done
+	wait "$HPID"
+}
+
+# --- doctor (Install / Fix Arduino Tools) helpers ---
+brew_version() { [ -n "$BREW" ] && [ -x "$BREW" ] && "$BREW" --version 2>/dev/null | head -1; }
+cli_version() {
+	[ -n "$CLI" ] && [ -x "$CLI" ] || return 1
+	"$CLI" version 2>/dev/null | head -1 | grep -o 'Version: [^ ]*' | cut -d' ' -f2
+}
+core_lines() {
+	[ -n "$CLI" ] && [ -x "$CLI" ] || return 1
+	"$CLI" core list --format json 2>/dev/null | "$PY" -c \
+		'import json, sys; [print(p["id"], p.get("installed_version", "?")) for p in json.load(sys.stdin)["platforms"]]'
+}
+rlwrap_ok() { RLW="${RLWRAP_BIN:-$(command -v rlwrap)}"; [ -n "$RLW" ] && [ -x "$RLW" ]; }
+have_core() { echo "$CORES" | awk -v p="$1" '$1 == p { f=1 } END { exit !f }'; }
+# Sets PORT/FQBN/BNAME for the connected board. On failure sets BOARDWHY to
+# none (nothing plugged in), stale (configured port empty),
+# "ambiguous: <friendly names>", or "unrecognized: <ports>" and returns 1.
+doctor_board() {
+	OUT="$(resolve 2>&1)" || {
+		case "$OUT" in
+			*looks\ like:*) BOARDWHY="ambiguous: $(echo "$OUT" | sed 's/.*looks like: \(.*\))\. Run.*/\1/')" ;;
+			*do\ not\ recognize\ it*) BOARDWHY="unrecognized: $(echo "$OUT" | sed 's/.*plugged in on \(.*\), but I.*/\1/')" ;;
+			*which\ board\ is\ on*) BOARDWHY="unrecognized: $(echo "$OUT" | sed 's/.*which board is on \(.*\)\. Run.*/\1/')" ;;
+			*more\ than\ one\ unrecognized*) BOARDWHY="unrecognized: $(echo "$OUT" | sed 's/.*unrecognized USB devices (\(.*\))\. Unplug.*/\1/')" ;;
+			*no\ known\ board\ on*) BOARDWHY="stale" ;;
+			*) BOARDWHY="none" ;;
+		esac
+		return 1
+	}
+	eval "$OUT"
+	BNAME="$(listall_json | FQBN="$(fqbn_base "$FQBN")" "$PY" -c '
+import json, os, sys
+want = os.environ["FQBN"]
+for b in json.load(sys.stdin)["boards"]:
+    if b["fqbn"] == want:
+        print(b["name"]); break
+')"
+	[ -n "${BNAME:-}" ] || BNAME="$FQBN"
+}
+ask() { printf '%s [y/N] ' "$1" >&2; ANS=""; read -r ANS || true; [ "$ANS" = y ] || [ "$ANS" = Y ]; }
+# All installed boards matching Q (exact FQBN or case-insensitive substring
+# of name/FQBN), as name|fqbn lines: folk-word aliases first (longest word
+# wins), then substring matches with generic Dev Module profiles first.
+# Empty (exit 0) when nothing matches.
+match_list() {
+	QL="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')"
+	KW="${BOARD_KEYWORDS:-$(dirname "$0")/../board_keywords.txt}"
+	"$0" boards installed | KW_FILE="$KW" "$PY" -c '
+import os, sys
+q = sys.argv[1].lower()
+norm = lambda s: "".join(c for c in s.lower() if c not in " -_")
+nq = norm(q)
+by_fqbn = {}
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line or "|" not in line:
+        continue
+    name, fqbn = line.split("|", 1)
+    by_fqbn[fqbn] = name
+alias = {}  # fqbn -> longest folk word that found it
+try:
+    with open(os.environ["KW_FILE"]) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "|" not in line:
+                continue
+            word, fqbn = line.split("|", 1)
+            word, fqbn = norm(word.strip()), fqbn.strip()
+            if word and word in nq and fqbn in by_fqbn:
+                if len(word) > len(alias.get(fqbn, "")):
+                    alias[fqbn] = word
+except OSError:
+    pass
+for fqbn in sorted(alias, key=lambda f: (-len(alias[f]), by_fqbn[f].lower())):
+    print("%s|%s" % (by_fqbn[fqbn], fqbn))
+hits = []
+for fqbn, name in by_fqbn.items():
+    if fqbn in alias:
+        continue
+    if q == fqbn.lower() or q in name.lower() or q in fqbn.lower():
+        hits.append((name, fqbn))
+hits.sort(key=lambda h: (0 if "dev module" in h[0].lower() else 1, h[0].lower()))
+for name, fqbn in hits:
+    print("%s|%s" % (name, fqbn))
+' "$QL"
+}
+quit_early() { echo "OK -- re-run Bundles > Arduino > Install / Fix Arduino Tools any time."; exit 1; }
+drun() { if [ "${DOCTOR_DRYRUN:-0}" = 1 ]; then echo "would run: $*"; else "$@"; fi }
+
+# Fill TM_ARDUINO_* gaps from the sketch's own record. Sets SK_FROM_YAML=1
+# when the FQBN came from there (for info's source label).
+sketch_defaults() {
+	SK_FROM_YAML=0 SK_PORT_YAML=0
+	if [ -z "${TM_ARDUINO_FQBN:-}" ]; then
+		YF="$(yaml_val "$1" default_fqbn)"
+		[ -n "$YF" ] && { TM_ARDUINO_FQBN="$YF"; SK_FROM_YAML=1; }
+	fi
+	if [ -z "${TM_ARDUINO_PORT:-}" ]; then
+		YP="$(yaml_val "$1" default_port)"
+		[ -n "$YP" ] && { TM_ARDUINO_PORT="$YP"; SK_PORT_YAML=1; }
+	fi
+}
+
+sketch_dir() {
+	[ $# -ge 1 ] || fail "no sketch given (open a sketch file first)"
+	[ -d "$1" ] || fail "sketch dir not found: $1"
+	want="$(basename "$1").ino"
+	[ -f "$1/$want" ] && { echo "$1"; return 0; }
+	suspect="$(ls "$1" 2>/dev/null | grep -i '\.ino' | head -3 | tr '\n' ' ')"
+	if [ -n "$suspect" ]; then
+		fail "no $want in $1 (found: $suspect -- the .ino must be named exactly after its folder; check typos/trailing spaces)"
+	fi
+	near="$(ls "$1" 2>/dev/null | head -8 | tr '\n' ' ')"
+	fail "no .ino file in $1 (contains: ${near:-nothing}). Arduino needs $1/$want"
+}
+
+main() {
+verb="${1:-}"; [ $# -gt 0 ] && shift
+[ "$verb" = doctor ] || need_cli
+case "$verb" in
+	cli) echo "$CLI" ;;
+	detect) resolve ;;
+	ports)
+		JSON="$("$CLI" board list --format json 2>/dev/null)" || fail "'arduino-cli board list' failed"
+		echo "$JSON" | "$PY" -c '
+import json, sys
+try:
+    ports = json.load(sys.stdin)["detected_ports"]
+except (ValueError, KeyError):
+    sys.exit("arduino-build: board list returned unparsable JSON")
+for p in ports:
+    bs = p.get("matching_boards", [])
+    if bs:
+        for b in bs:
+            print("%s|%s" % (p["port"]["address"], b["fqbn"]))
+    elif "USB" in p.get("port", {}).get("protocol_label", ""):
+        print("%s|?" % p["port"]["address"])
+' ;;
+	compile)
+		SKETCH="$(sketch_dir "$@")" || exit 1
+		sketch_defaults "$SKETCH"
+		resolved
+		echo "Compiling $(basename "$SKETCH") for $FQBN..."
+		with_heartbeat "compiling" "$CLI" compile --fqbn "$FQBN" "$SKETCH" ;;
+	upload)
+		SKETCH="$(sketch_dir "$@")" || exit 1
+		sketch_defaults "$SKETCH"
+		resolved
+		free_port "$PORT"
+		echo "Uploading $(basename "$SKETCH") to $FQBN on $PORT..."
+		with_heartbeat "uploading" "$CLI" compile --upload -p "$PORT" --fqbn "$FQBN" "$SKETCH" ;;
+	clean) "$CLI" cache clean ;;
+	doctor)
+		if [ "${1:-}" = "--check" ]; then
+			FAIL=""
+			BV="$(brew_version)"; [ -n "$BV" ] || FAIL="$FAIL brew"
+			CV="$(cli_version)"; [ -n "$CV" ] || FAIL="$FAIL cli"
+			CORES="$(core_lines 2>/dev/null)"
+			if doctor_board 2>/dev/null; then
+				PLAT="$(echo "$FQBN" | cut -d: -f1-2)"
+				have_core "$PLAT" || FAIL="$FAIL core:$PLAT"
+				BOARDLINE="Board: $BNAME on $PORT"
+			else
+				[ -n "$CORES" ] || FAIL="$FAIL core"
+				case "${BOARDWHY:-none}" in
+					ambiguous:*) BOARDLINE="Board: unclear (looks like ${BOARDWHY#ambiguous: }) -- run Select Board";;
+					unrecognized:*) BOARDLINE="Board: unknown device on ${BOARDWHY#unrecognized: } -- run Select Board to pick yours";;
+					stale) BOARDLINE="Board: configured port ${TM_ARDUINO_PORT:-?} is empty (unplugged?)";;
+					*) BOARDLINE="Board: none detected (plug one in)";;
+				esac
+			fi
+			[ -n "$FAIL" ] && { echo "missing:$FAIL"; exit 1; }
+			echo "You are good to go!"
+			echo "$BV"
+			echo "arduino-cli $CV"
+			echo "Cores: $(echo "$CORES" | tr '\n' ' ' | sed 's/ $//')"
+			echo "$BOARDLINE"
+			exit 0
+		fi
+		if [ "${DOCTOR_DRYRUN:-0}" = 1 ]; then B=brew; C=arduino-cli; else B="$BREW"; C="$CLI"; fi
+		echo "Arduino setup check."
+		echo
+		BV="$(brew_version)"
+		if [ -z "$BV" ]; then
+			echo "[missing] Homebrew -- install it with:"
+			echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+			ask "Run it now?" || quit_early
+			drun /bin/bash -c '$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)'
+			if [ "${DOCTOR_DRYRUN:-0}" = 1 ]; then BV="Homebrew (dry run)"; else BREW="$(command -v brew)"; BV="$(brew_version)"; fi
+			[ -n "$BV" ] || fail "Homebrew install did not produce a brew command -- run it by hand, then re-run this check."
+		fi
+		echo "[ok] $BV"
+		CV="$(cli_version)"
+		if [ -z "$CV" ]; then
+			ask "Install arduino-cli?" || quit_early
+			drun $B install arduino-cli
+			if [ "${DOCTOR_DRYRUN:-0}" = 1 ]; then CV="(dry run)"; else CLI="${ARDUINO_CLI:-$(command -v arduino-cli)}"; CV="$(cli_version)"; fi
+			[ -n "$CV" ] || fail "arduino-cli install failed -- try 'brew install arduino-cli' by hand, then re-run."
+		fi
+		echo "[ok] arduino-cli $CV"
+		CORES="$(core_lines 2>/dev/null)"
+		if doctor_board 2>/dev/null; then
+			PLAT="$(echo "$FQBN" | cut -d: -f1-2)"
+			if have_core "$PLAT"; then
+				echo "[ok] Core $PLAT ($(echo "$CORES" | awk -v p="$PLAT" '$1 == p { print $2 }'))"
+			else
+				echo "[missing] Core $PLAT (for your $BNAME)."
+				ask "Install it?" || quit_early
+				drun $C core update-index
+				drun $C core install "$PLAT"
+			fi
+			echo "[ok] Board $BNAME on $PORT"
+		else
+			if [ -z "$CORES" ]; then
+				echo "[missing] No cores installed, and no board to pick one from."
+				echo "  1) arduino:avr (Uno and friends)"
+				echo "  2) esp32:esp32 (ESP32 family)"
+				echo "  3) both"
+				WANT=""
+				while [ -z "$WANT" ]; do
+					printf 'Choice? (1/2/3, empty to quit) ' >&2
+					ANS=""; read -r ANS || true
+					case "$ANS" in
+						1) WANT="arduino:avr";; 2) WANT="esp32:esp32";; 3) WANT="arduino:avr esp32:esp32";;
+						"") quit_early;; *) echo "Type 1, 2, 3, or nothing to quit.";;
+					esac
+				done
+				drun $C core update-index
+				for P in $WANT; do drun $C core install "$P"; done
+			else
+				echo "[ok] Cores installed: $(echo "$CORES" | cut -d' ' -f1 | tr '\n' ' ' | sed 's/ $//')"
+			fi
+			case "${BOARDWHY:-none}" in
+				ambiguous:*) echo "[..] Board unclear (looks like ${BOARDWHY#ambiguous: }) -- run Select Board to pick yours";;
+				unrecognized:*) echo "[..] Unknown device on ${BOARDWHY#unrecognized: } -- run Select Board to pick yours";;
+				stale) echo "[..] Configured port ${TM_ARDUINO_PORT:-?} is empty (unplugged?)";;
+				*) echo "[..] No board detected (plug one in any time)";;
+			esac
+		fi
+		if rlwrap_ok; then :; else
+			echo "[tip] rlwrap is missing -- up-arrow history in the monitor."
+			if ask "Install it?"; then drun $B install rlwrap; else echo "(skipped rlwrap)"; fi
+		fi
+		if [ "${DOCTOR_DRYRUN:-0}" = 1 ]; then echo "Done (dry run -- nothing was installed)."; else echo "All set -- happy hacking!"; fi
+		exit 0 ;;
+	monitor)
+		PORT="${TM_ARDUINO_PORT:-$("$0" ports 2>/dev/null | head -1 | cut -d'|' -f1)}"
+		[ -n "$PORT" ] || fail "no boards detected (plug one in)"
+		"$CLI" monitor -p "$PORT" -c "baudrate=${TM_ARDUINO_BAUD:-115200}" ;;
+	asm)
+		SKETCH="$(sketch_dir "$@")" || exit 1
+		sketch_defaults "$SKETCH"
+		resolved
+		OUT="$(mktemp -d -t arduino-asm)" || fail "mktemp failed"
+		with_heartbeat "compiling" "$CLI" compile --fqbn "$FQBN" --output-dir "$OUT" "$SKETCH" >&2 || fail "compile failed -- see above"
+		ELF="$(ls "$OUT"/*.elf 2>/dev/null | head -1)"
+		[ -n "$ELF" ] || fail "no .elf produced in $OUT"
+		DUMP="$(find "${HOME}/Library/Arduino15/packages" -name '*-objdump' -type f 2>/dev/null | head -1)"
+		[ -n "$DUMP" ] || fail "no *-objdump under ~/Library/Arduino15/packages (install the board core?)"
+		echo "== $ELF =="
+		"$DUMP" -d "$ELF" ;;
+	libraries-dir)
+		USERDIR="$("$CLI" config get directories.user 2>/dev/null)" || USERDIR="${HOME}/Documents/Arduino"
+		[ "${1:-}" = "--create" ] && mkdir -p "${USERDIR}/libraries"
+		echo "${USERDIR}/libraries" ;;
+	boards)
+		case "${1:-}" in
+			detected)
+				JSON="$("$CLI" board list --format json 2>/dev/null)" || fail "'board list' failed"
+				KNOWN_FQBNS="$(listall_json | "$PY" -c 'import json, sys; print("\n".join(sorted(b["fqbn"] for b in json.load(sys.stdin)["boards"])))')" || fail "'board listall' failed"
+				KNOWN_FQBNS="$KNOWN_FQBNS" "$PY" -c '
+import json, os, sys
+known = set(os.environ["KNOWN_FQBNS"].split())
+ports = json.load(sys.stdin)["detected_ports"]
+for p in ports:
+    for b in p.get("matching_boards", []):
+        tag = "known" if b["fqbn"] in known else "alias"
+        print("%s|%s|%s|%s" % (b["name"], b["fqbn"], tag, p["port"]["address"]))
+' <<<"$JSON" ;;
+			installed)
+				IDS="$("$CLI" core list --format json 2>/dev/null | "$PY" -c 'import json, sys; print("\n".join(sorted(p["id"] for p in json.load(sys.stdin)["platforms"])))')" || fail "'core list' failed"
+				listall_json | IDS="$IDS" "$PY" -c '
+import json, os, sys
+ids = tuple(os.environ["IDS"].split())
+seen = set()
+for b in json.load(sys.stdin)["boards"]:
+    if b["fqbn"].startswith(ids) and b["fqbn"] not in seen:
+        seen.add(b["fqbn"])
+        print("%s|%s" % (b["name"], b["fqbn"]))
+' ;;
+			family)
+				JSON="$("$CLI" board list --format json 2>/dev/null)" || fail "'board list' failed"
+				echo "$JSON" | "$PY" -c '
+import json, sys
+try:
+    ports = json.load(sys.stdin)["detected_ports"]
+except (ValueError, KeyError):
+    sys.exit("arduino-build: board list returned unparsable JSON")
+plats = set()
+for p in ports:
+    for b in p.get("matching_boards", []):
+        f = b.get("fqbn", "")
+        if f.count(":") >= 2:
+            plats.add(":".join(f.split(":")[:2]))
+if len(plats) == 1:
+    print(next(iter(plats)).split(":")[0])
+' ;;
+			*) fail "usage: arduino-build boards detected|installed|family" ;;
+		esac ;;
+	match-board)
+		Q="${1:-}"
+		[ -n "$Q" ] || fail "type part of a board name or FQBN"
+		MATCHES="$(match_list "$Q")"
+		[ -n "$MATCHES" ] || fail "no installed board matches '$Q' (see: arduino-cli board listall)"
+		N="$(echo "$MATCHES" | wc -l | tr -d ' ')"
+		if [ "$N" -eq 1 ]; then
+			echo "$MATCHES" | cut -d'|' -f2
+		else
+			fail "$N boards match '$Q': $(echo "$MATCHES" | cut -d'|' -f2 | head -8 | tr '\n' ' ')-- be more specific"
+		fi ;;
+	match-boards)
+		[ -n "${1:-}" ] || exit 0
+		match_list "$1" ;;
+	info)
+		HTML=0; [ "${1:-}" = "--html" ] && { HTML=1; shift; }
+		INFODIR="${1:-}"
+		HAD_PORT="${TM_ARDUINO_PORT:-}"
+		ENV_F="${TM_ARDUINO_FQBN:-}" ENV_P="${TM_ARDUINO_PORT:-}" ENV_B="${TM_ARDUINO_BAUD:-}"
+		[ -n "$INFODIR" ] && [ -d "$INFODIR" ] && sketch_defaults "$INFODIR"
+		PORT="" FQBN="" NAME="" RESOLVE_ERR=""
+		R="$(resolve 2>&1)" && eval "$R" || RESOLVE_ERR="$R"
+		if [ -n "$FQBN" ]; then
+			NAME="$(listall_json | FQBN="$(fqbn_base "$FQBN")" "$PY" -c '
+import json, os, sys
+want = os.environ["FQBN"]
+for b in json.load(sys.stdin)["boards"]:
+    if b["fqbn"] == want:
+        print(b["name"]); break
+')"
+			[ -n "$NAME" ] || NAME="$FQBN"
+		else
+			NAME=""
+		fi
+		if [ -n "${TM_ARDUINO_FQBN:-}" ]; then
+			if [ "${SK_FROM_YAML:-0}" = 1 ]; then
+				SRC="sketch.yaml"
+			elif [ -n "$INFODIR" ] && [ -f "$INFODIR/.tm_properties" ] && grep -q '^TM_ARDUINO_FQBN' "$INFODIR/.tm_properties" 2>/dev/null; then
+				SRC="sketch .tm_properties"
+			else
+				SRC="TM_ARDUINO_FQBN"
+			fi
+		elif [ -n "$FQBN" ]; then
+			SRC="auto-detected"
+		else
+			SRC="unresolved"
+		fi
+		if [ -n "$HAD_PORT" ]; then
+			PSRC="TextMate setting"
+		elif [ "${SK_PORT_YAML:-0}" = 1 ]; then
+			PSRC="sketch.yaml"
+		elif [ -n "$PORT" ]; then
+			PSRC="single connected board"
+		else
+			PSRC="unresolved"
+		fi
+		if [ "$HTML" = 0 ]; then
+			[ -n "$RESOLVE_ERR" ] && { echo "$RESOLVE_ERR" >&2; exit 1; }
+			echo "// Board: $NAME [$FQBN] on $PORT (from $SRC)"
+			return 0
+		fi
+		# HTML diagnostics page.
+		if [ -n "${TM_ARDUINO_BAUD:-}" ]; then BAUD="$TM_ARDUINO_BAUD"; BSRC="TextMate setting";
+		elif [ -n "$INFODIR" ] && [ -n "$(sketch_baud "$INFODIR")" ]; then BAUD="$(sketch_baud "$INFODIR")"; BSRC="Serial.begin()";
+		elif [ -n "$INFODIR" ] && [ -n "$(yaml_baud "$INFODIR")" ]; then BAUD="$(yaml_baud "$INFODIR")"; BSRC="sketch.yaml";
+		else BAUD="115200"; BSRC="default (nothing set it)"; fi
+		DETECTED="$("$0" ports 2>/dev/null | sed 's/|/ | /g' || true)"
+		[ -z "$DETECTED" ] && DETECTED="(no boards detected)"
+		if [ -n "$INFODIR" ] && [ -f "$INFODIR/sketch.yaml" ]; then YAMLDUMP="$(cat "$INFODIR/sketch.yaml")";
+		else YAMLDUMP="(absent -- run Select Board)"; fi
+		SKETCH_NAME="$(basename "${INFODIR:-sketch}")"
+		FQBN="$FQBN" NAME="$NAME" SRC="$SRC" PORT="$PORT" PSRC="$PSRC" BAUD="$BAUD" BSRC="$BSRC" \
+		DETECTED="$DETECTED" YAMLDUMP="$YAMLDUMP" SKETCH="$SKETCH_NAME" RERR="$RESOLVE_ERR" \
+		TMF="$ENV_F" TMP="$ENV_P" TMB="$ENV_B" "$PY" <<'EOF'
+import html, os
+e = lambda k: html.escape(os.environ.get(k, ''), quote=True)
+rows = [
+    ("Board", "%s<br><tt>%s</tt> <i>(board ID)</i>" % (e('NAME'), e('FQBN')) if os.environ.get('FQBN') else "<i>unresolved</i>", e('SRC')),
+    ("Port", "<tt>%s</tt>" % e('PORT') if os.environ.get('PORT') else "<i>unresolved</i>", e('PSRC')),
+    ("Monitor baud", "<tt>%s</tt>" % e('BAUD'), e('BSRC')),
+]
+print("<h2>%s</h2>" % e('SKETCH'))
+if os.environ.get('RERR'):
+    print("<p><b>Not ready to build:</b> %s</p>" % e('RERR'))
+print("<table>")
+for label, val, src in rows:
+    print("<tr><td><b>%s</b></td><td>%s</td><td><i>from %s</i></td></tr>" % (label, val, src))
+print("</table>")
+print("<h3>Detected boards</h3><pre>%s</pre>" % e('DETECTED'))
+print("<h3>sketch.yaml</h3><pre>%s</pre>" % e('YAMLDUMP'))
+ov = [k for k in (('TM_ARDUINO_FQBN', 'TMF'), ('TM_ARDUINO_PORT', 'TMP'), ('TM_ARDUINO_BAUD', 'TMB')) if os.environ.get(k[1])]
+print("<h3>TextMate overrides in effect</h3>")
+print("<pre>%s</pre>" % "\n".join("%s = %s" % (k, e(v)) for k, v in ov) if ov else "<p>none</p>")
+EOF
+		;;
+	use-board)
+		DIR="${1:-}" FQBN="${2:-}"
+		sketch_dir "$DIR" >/dev/null || exit 1
+		[ -n "$FQBN" ] || fail "no FQBN given"
+		# FQBN (+ port when unambiguous) via the sanctioned writer.
+		APORTS="$("$0" ports 2>/dev/null | cut -d'|' -f1 | sort -u | grep . || true)"
+		if [ "$(printf '%s\n' "$APORTS" | grep -c .)" -eq 1 ]; then
+			AOUT="$("$CLI" board attach -b "$FQBN" -p "$APORTS" "$DIR" 2>&1)" || fail "board attach failed for $DIR: $AOUT"
+		else
+			AOUT="$("$CLI" board attach -b "$FQBN" "$DIR" 2>&1)" || fail "board attach failed for $DIR: $AOUT"
+		fi
+		# Baud from the sketch itself; `attach` has no baud flag, so merge narrowly.
+		ABAUD="$(sketch_baud "$DIR")"
+		if [ -n "$ABAUD" ]; then
+			"$PY" - "$DIR/sketch.yaml" "$ABAUD" <<'EOF' 2>/dev/null || fail "could not record baudrate in sketch.yaml"
+import re, sys
+p, baud = sys.argv[1], sys.argv[2]
+s = open(p).read()
+m = re.search(r'(?m)^default_port_config:\n((?:[ \t]+.*\n)*)', s)
+if m:
+    block = m.group(1)
+    if re.search(r'(?m)^[ \t]*baudrate:', block):
+        block = re.sub(r'(?m)^([ \t]*baudrate:[ \t]*).*$', r'\g<1>%s' % baud, block, count=1)
+    else:
+        block += '  baudrate: %s\n' % baud
+    s = s[:m.start(1)] + block + s[m.end(1):]
+else:
+    s = s.rstrip('\n') + '\ndefault_port_config:\n  baudrate: %s\n' % baud
+open(p, 'w').write(s)
+EOF
+		fi
+		BNAME="$(listall_json | FQBN="$(fqbn_base "$FQBN")" "$PY" -c '
+import json, os, sys
+want = os.environ["FQBN"]
+for b in json.load(sys.stdin)["boards"]:
+    if b["fqbn"] == want:
+        print(b["name"]); break
+')"
+		[ -n "${BNAME:-}" ] || BNAME="$FQBN"
+		echo "Board for this sketch: $BNAME (saved to sketch.yaml)" ;;
+	monitor-resolve)
+		DIR="${1:-}" PORT="${2:-}" BAUD="${3:-}" PORT_SRC="" BAUD_SRC=""
+		[ -n "$PORT" ] && PORT_SRC="TextMate setting"
+		[ -n "$BAUD" ] && BAUD_SRC="TextMate setting"
+		if [ -n "$DIR" ] && [ -d "$DIR" ]; then
+			if [ -z "$PORT" ]; then YP="$(yaml_val "$DIR" default_port)"; [ -n "$YP" ] && { PORT="$YP"; PORT_SRC="sketch.yaml"; }; fi
+			if [ -z "$BAUD" ]; then SB="$(sketch_baud "$DIR")"; [ -n "$SB" ] && { BAUD="$SB"; BAUD_SRC="Serial.begin()"; }; fi
+			if [ -z "$BAUD" ]; then YB="$(yaml_baud "$DIR")"; [ -n "$YB" ] && { BAUD="$YB"; BAUD_SRC="sketch.yaml"; }; fi
+		fi
+		if [ -z "$PORT" ]; then
+			ALLP="$("$0" ports 2>/dev/null | cut -d'|' -f1 | sort -u | grep . || true)"
+			[ "$(printf '%s\n' "$ALLP" | grep -c .)" -eq 1 ] && { PORT="$ALLP"; PORT_SRC="single connected board"; }
+		fi
+		PG="$PORT"
+		if [ -z "$PG" ]; then
+			PG="${ALLP:-$("$0" ports 2>/dev/null | cut -d'|' -f1 | sort -u | grep . || true)}"
+			PG="$(printf '%s\n' "$PG" | head -1)"
+		fi
+		[ -z "$PORT" ] && PORT_SRC="needs a choice"
+		[ -z "$BAUD" ] && BAUD_SRC="not set"
+		echo "PORT='$PORT'"
+		echo "BAUD='$BAUD'"
+		echo "PORT_GUESS='$PG'"
+		echo "BAUD_GUESS='${BAUD:-115200}'"
+		echo "SRC_PORT='$PORT_SRC'"
+		echo "SRC_BAUD='$BAUD_SRC'" ;;
+	version|--version) echo "arduino-build 1.0 -- $("$CLI" version 2>/dev/null | head -1)" ;;
+	*) fail "usage: arduino-build compile|upload|clean|doctor|detect|monitor|asm|libraries-dir|cli|version|boards|match-board|match-boards|info|use-board|monitor-resolve [ARGS]" ;;
+esac
+}
+
+[ "${ARDUINO_BUILD_SOURCED:-}" = 1 ] || main "$@"

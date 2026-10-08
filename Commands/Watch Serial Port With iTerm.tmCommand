@@ -5,32 +5,28 @@
 	<key>beforeRunningCommand</key>
 	<string>nop</string>
 	<key>command</key>
-	<string>TM_BUNDLE_SUPPORT_ESC=$(echo $TM_BUNDLE_SUPPORT | sed '/Support/s/ /\\\\ /')
- osascript -e "tell application \"iTerm\"
-	activate
-
-	try
-		set _term to first terminal
-	on error
-		set _term to (make new terminal)
-	end try
-
-	tell _term
-		launch session \"Default\"
-		set _session to last session
-	end tell
-
-	tell _session
-		set name to \"Arduino Monitor\"
-		write text \"${TM_BUNDLE_SUPPORT_ESC}/Monitor\"
-	end tell
-
-end tell"
+	<string># Paths travel via argv + `quoted form of`, so spaces/quotes in them cannot
+# break AppleScript string parsing (a hand-escaped `\ ` is a -2741 error).
+osascript \
+  -e 'on run argv' \
+  -e 'tell application "iTerm"' \
+  -e 'activate' \
+  -e 'if (count of windows) = 0 then create window with default profile' \
+  -e 'tell current window' \
+  -e 'create tab with default profile' \
+  -e 'tell current session' \
+  -e 'set name to "Arduino Monitor"' \
+  -e 'write text (quoted form of (item 1 of argv &amp; "/Monitor") &amp; " " &amp; quoted form of item 2 of argv &amp; " " &amp; quoted form of item 3 of argv &amp; " " &amp; quoted form of item 4 of argv)' \
+  -e 'end tell' \
+  -e 'end tell' \
+  -e 'end tell' \
+  -e 'end run' \
+  -- "$TM_BUNDLE_SUPPORT" "${TM_DIRECTORY:-}" "${TM_ARDUINO_PORT:-}" "${TM_ARDUINO_BAUD:-}"
 </string>
 	<key>input</key>
 	<string>none</string>
 	<key>name</key>
-	<string>iTerm</string>
+	<string>Monitor with iTerm</string>
 	<key>output</key>
 	<string>discard</string>
 	<key>scope</key>

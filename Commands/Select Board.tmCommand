@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>beforeRunningCommand</key>
+	<string>nop</string>
+	<key>command</key>
+	<string>#!/usr/bin/env ruby
+# Notes
+# bundle uses https://github.com/arduino/arduino-cli
+
+require ENV["TM_SUPPORT_PATH"] + "/lib/ui"
+require ENV["TM_SUPPORT_PATH"] + "/lib/escape"
+
+unless ENV["TM_DIRECTORY"]
+  TextMate::UI.tool_tip("Open a sketch file first")
+  exit 0
+end
+ab = "#{ENV['TM_BUNDLE_SUPPORT']}/bin/arduino-build"
+dir = ENV["TM_DIRECTORY"]
+
+cli = `#{e_sh(ab)} cli 2&gt;&amp;1`
+unless $?.success?
+  TextMate::UI.tool_tip(cli.sub(/^arduino-build: /, "").strip)
+  exit 0
+end
+
+# Unambiguous setup (e.g. one Uno): no questions, just write it.
+det = `#{e_sh(ab)} detect 2&gt;&amp;1`
+if $?.success? &amp;&amp; det =~ /^FQBN=(.+)$/
+  out = `#{e_sh(ab)} use-board #{e_sh(dir)} #{e_sh($1)} 2&gt;&amp;1`
+  TextMate::UI.tool_tip(out.strip)
+  exit 0
+end
+
+installed = `#{e_sh(ab)} boards installed 2&gt;/dev/null`.lines.map do |l|
+  l.chomp.split("|", 2)
+end.reject { |f| f.size &lt; 2 }
+if installed.empty?
+  TextMate::UI.tool_tip("No boards installed -- run Install / Fix Arduino Tools first.")
+  exit 0
+end
+
+def attach(ab, dir, fqbn)
+  out = `#{e_sh(ab)} use-board #{e_sh(dir)} #{e_sh(fqbn)} 2&gt;&amp;1`
+  TextMate::UI.tool_tip(out.strip)
+  exit 0
+end
+
+# Menu for one query. Returns nil when nothing matches, :narrow / :search
+# when a tail row was picked, else attaches and exits.
+def menu_pick(ab, dir, query, broad)
+  ms = `#{e_sh(ab)} match-boards #{e_sh(query)} 2&gt;/dev/null`.lines.map do |l|
+    l.chomp.split("|", 2)
+  end.reject { |f| f.size &lt; 2 }
+  return nil if ms.empty?
+  attach(ab, dir, ms[0][1]) if ms.size == 1 &amp;&amp; !broad
+  counts = ms.each_with_object(Hash.new(0)) { |(n, _), h| h[n] += 1 }
+  shown = ms.first(15)
+  items = shown.map { |n, f| counts[n] &gt; 1 ? "#{n} [#{f}]" : n }
+  tails = []
+  if ms.size &gt; 15
+    items &lt;&lt; "...and #{ms.size - 15} more -- type more letters to narrow"
+    tails &lt;&lt; :narrow
+  end
+  if broad
+    items &lt;&lt; "Search all boards instead..."
+    tails &lt;&lt; :search
+  end
+  idx = TextMate::UI.menu(items)
+  exit 0 if idx.nil?
+  return tails[idx - shown.size] if idx &gt;= shown.size
+  attach(ab, dir, shown[idx][1])
+end
+
+# Family first: when everything plugged in agrees (e.g. all ESP32), open the
+# short list straight away. Detection guesses are never offered as picks --
+# they are wrong exactly when this dialog appears (an H2 "looks like"
+# an Ozobot), so the menu is a pre-filtered search, always escapable.
+fam = `#{e_sh(ab)} boards family 2&gt;/dev/null`.strip
+menu_pick(ab, dir, fam, true) unless fam.empty?
+
+prompt = "Which board? Try: uno, esp32, nano"
+loop do
+  q = TextMate::UI.request_string(:title =&gt; "Select Board", :prompt =&gt; prompt,
+    :button1 =&gt; "Find", :button2 =&gt; "Cancel")
+  exit 0 if q.nil? || q.strip.empty?
+  r = menu_pick(ab, dir, q.strip, false)
+  if r.nil?
+    prompt = "No match -- try: uno, esp32, nano"
+  elsif r == :narrow
+    prompt = "Still too many -- type more letters:"
+  else
+    prompt = "Which board? Try: uno, esp32, nano"
+  end
+end
+</string>
+	<key>input</key>
+	<string>none</string>
+	<key>inputFormat</key>
+	<string>text</string>
+	<key>name</key>
+	<string>Select Board</string>
+	<key>outputCaret</key>
+	<string>afterOutput</string>
+	<key>outputFormat</key>
+	<string>text</string>
+	<key>outputLocation</key>
+	<string>discard</string>
+	<key>scope</key>
+	<string>source.c++.arduino</string>
+	<key>uuid</key>
+	<string>584AA7CD-A0E2-4F28-9D00-F9A7B2AB6AC8</string>
+	<key>version</key>
+	<integer>3</integer>
+</dict>
+</plist>

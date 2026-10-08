@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>beforeRunningCommand</key>
+	<string>nop</string>
+	<key>command</key>
+	<string>#!/usr/bin/env ruby
+# Install / Fix Arduino Tools: fast health check first (dialog when good),
+# full Terminal walkthrough when anything is missing.
+require ENV["TM_SUPPORT_PATH"] + "/lib/ui"
+require ENV["TM_SUPPORT_PATH"] + "/lib/escape"
+
+ab = "#{ENV['TM_BUNDLE_SUPPORT']}/bin/arduino-build"
+out = `#{e_sh(ab)} doctor --check 2&gt;&amp;1`
+if $?.success?
+  TextMate::UI.alert(:informational, "Arduino Setup", out.strip, "OK")
+  exit 0
+end
+
+# Sick: walk through installs in Terminal, where sudo and progress are visible.
+system("osascript",
+  "-e", "on run argv",
+  "-e", 'tell application "Terminal"',
+  "-e", "activate",
+  "-e", 'do script (quoted form of item 1 of argv &amp; " doctor")',
+  "-e", "end tell",
+  "-e", "end run",
+  "--", ab)
+</string>
+	<key>input</key>
+	<string>none</string>
+	<key>inputFormat</key>
+	<string>text</string>
+	<key>name</key>
+	<string>Install / Fix Arduino Tools</string>
+	<key>outputCaret</key>
+	<string>afterOutput</string>
+	<key>outputFormat</key>
+	<string>text</string>
+	<key>outputLocation</key>
+	<string>discard</string>
+	<key>scope</key>
+	<string>source.c++.arduino</string>
+	<key>uuid</key>
+	<string>6CA13CE1-22F1-4284-B1A0-16D1EA396EBC</string>
+	<key>version</key>
+	<integer>2</integer>
+</dict>
+</plist>

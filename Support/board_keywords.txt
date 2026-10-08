@@ -1,0 +1,14 @@
+# Folk words for Select Board: words printed on boards (or their boxes) that
+# appear in NO board name, one "word|fqbn" per line. A search containing the
+# word lists that board first. Only installed boards are offered; words that
+# already match by name need no entry here.
+#
+# Matching ignores case, spaces, dashes, and underscores, so "wroom-32",
+# "WROOM 32", and "wroom32e" all find wroom32. Longer words win ties.
+wroom32|esp32:esp32:esp32
+wroom|esp32:esp32:esp32
+devkitv1|esp32:esp32:esp32
+devkitc|esp32:esp32:esp32
+devkit|esp32:esp32:esp32
+wroom1|esp32:esp32:esp32s3
+wroom2|esp32:esp32:esp32s3

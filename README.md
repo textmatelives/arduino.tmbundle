@@ -1,111 +1,88 @@
-Arduino TextMate Bundle 1.0a
-============================
-[TextMate](http://macromates.com) is the best editor in human history. [Arduino](http://arduino.cc) is the easiest embedded platform to dive into. Why don't the two work together? The Arduino TextMate Bundle solves that glaring error, and the universe is thus balanced.
+# Arduino TextMate Bundle
 
-There are other TextMate bundles out there, but they're mostly over two years old and don't work with new Arduino versions. This project aims to remain up-to-date and make embedded as enjoyable as everything else in TextMate.
+Edit, compile, and upload Arduino sketches from TextMate. The build commands
+are a thin front end over [arduino-cli](https://arduino.github.io/arduino-cli/):
+no Java IDE needed, any board with a CLI core works (AVR, ESP32, ...).
 
-The little 'a' in '1.0a' stands for 'alpha'. Read that as "might not work for you". It will grow and improve with time, but for now brace yourself for bugs. That means bug reports, feature requests and patches!
+## Installation
 
-As of 1.0a, the bundle can compiles and uploads to the device, provides access to the documentation and highlights syntax correctly.
+1. Install this bundle
+ * TextMate Preferences > Bundles tick
+ * Or clone to `~/Library/Application Support/TextMate/Bundles/`
 
-Installation
+2. Run Bundles > Arduino > Install / Fix Arduino Tools. It checks for
+   Homebrew, arduino-cli, and a board core, and offers to install
+   anything missing. (Prefer the terminal? `brew install arduino-cli`,
+   then `arduino-cli core install esp32:esp32` -- or `arduino:avr`.)
+
+3. Plug your board in and run Bundles > Arduino > Select Board.
+   Single-board setups (e.g. an Uno) work with no configuration:
+   the port and board are auto-detected from `arduino-cli board list`.
+
+## Usage
+
+* **Bundles > Arduino > Select Board** Set the board for the current sketch
+  (saved to the sketch's `sketch.yaml`; unambiguous setups attach with no
+  questions, a plugged-in family opens its short list, otherwise type part
+  of the name and pick from the ranked matches)
+* **⌘B** Verify Sketch: compile the current sketch
+* **⌘U** Upload to Board: compile and upload to the connected board
+  (closes our serial monitor first if it holds the port)
+* **⇧⌘B** Show Assembly for the current sketch
+* **⌃⌘C** Clean the build cache
+* **⌃⌥⌘H** Look up the current word in the Arduino docs: CLI commands open
+  the command reference, language words open the language reference,
+  anything else opens the language index
+* **Bundles > Arduino > Monitor with Terminal.app / Monitor with iTerm** Serial monitor on the auto-detected port.
+  Before opening it, the launcher reads the port for a quarter of a second.
+  A `00 80` stream faster than the baud rate can carry means the USB-serial
+  chip is wedged: the monitor would show that as `????`, so it stops and
+  tells you to unplug the board and plug it back in. Slower non-text is
+  reported as a baud mismatch and the monitor still starts.
+* **Bundles > Arduino > Show Board Info** Diagnostics: what the next build and
+  monitor will use, where each value came from, detected boards, sketch.yaml
+
+## Where the board, port, and baud come from
+
+The sketch describes itself in `sketch.yaml` (board, monitor baud, usually the
+port). The CLI, the Arduino IDE, and a cloned copy of the sketch all read that
+file, so Select Board writes there -- FQBN and port via `arduino-cli board
+attach`, baud from your sketch's `Serial.begin()`. With it present, bare
+`arduino-cli compile`, `upload`, and `monitor` work in the sketch folder.
+
+The port is the shaky entry: `/dev/cu.usbmodem1101` is this Mac and this cable.
+Recording it is normal, and a missing or wrong port just falls through to
+auto-detection of the one connected board.
+
+Resolution order everywhere (first hit wins):
+
+* port: `TM_ARDUINO_PORT` → sketch.yaml → single connected board → ask.
+* baud: `TM_ARDUINO_BAUD` → `Serial.begin()` → sketch.yaml → 115200 default (announced, never asked).
+* board: `TM_ARDUINO_FQBN` → sketch.yaml → auto-detect, failing loud when ambiguous.
+
+Shell Variables (TextMate > Settings > Variables -- all optional overrides)
+============================================================================
+
+| Variable           | Meaning                                                                      |
+|:-------------------|:-----------------------------------------------------------------------------|
+| TM_ARDUINO_FQBN    | Board ID, e.g. `esp32:esp32:esp32h2`. Beats sketch.yaml and auto-detection.   |
+| TM_ARDUINO_PORT    | Serial port, e.g. `/dev/cu.usbmodem1101`. Also skips the ~1.5s port scan.     |
+| TM_ARDUINO_BAUD    | Serial monitor baud rate. Beats `Serial.begin()` and sketch.yaml.             |
+| TM_ARDUINO_BUILDER | Build backend (default `arduino-cli`; `idf` is planned for ESP-IDF projects). |
+
+For a sketch you intend to keep, consider adding a `profiles:` block to
+`sketch.yaml` pinning the core version and libraries, so it still builds
+after a boards-manager update.
+
+How it works
 ============
-1. [Get the latest Arduino](http://arduino.cc/en/Guide/MacOSX). Version 1.0 and later is supported, and it must be installed to /Applications
-2. [Get TextMate](http://macromates.com/).
-3. [Get the latest Arduino TextMate bundle](https://github.com/nasser/arduino.tmbundle/zipball/v1.0a).
-4. Extract the zip file to `~/Library/Application Support/TextMate/Bundles/Arduino.tmbundle`
-5. If TextMate was open during this process, click Bundles>Bundle Editor>Reload Bundles
-6. Check the 'Default Environment vars' near the top of `~/Library/Application Support/TextMate/Bundles/Arduino.tmbundle/Support/Makefile`.  Any you need to override - especially check the ARDUINO_MCU var - can be added in TextMate's Preferences => Advanced => Shell Variables.
 
+All build commands call `Support/bin/arduino-build`, which resolves the CLI,
+board, and port, then shells out to `arduino-cli`. `Support/tests/test_resolve.sh`
+covers the resolution logic against a stub CLI (no hardware needed):
 
-Usage
-=====
-* **⌘U** Compiles and uploads your sketch to the connected Arduino
-* **⌃⌥⌘H** Opens up local HTML documentation on to current word
-* **Bundles > Arduino > Watch Serial Port** Opens a terminal window monitoring the serial port.
-* **File > New From Template > Arduino > Basic Sketch** Creates a file with a blank basic sketch.
+    sh Support/tests/test_resolve.sh
 
-Shell Variables
-===============
-The compile/upload process can be finely controlled using TextMate's shell variables.
-
-Textmate > Preferences > Advanced > Shell Variables
-
-<table>
-  <tr>
-    <th>Variable</th>
-    <th>Value</th>
-  </tr>
-  <tr>
-    <td>BOARD</td>
-    <td>The Arduino variant being used. See table below.</td>
-  </tr>
-  <tr>
-	  <td>SERIALDEV</td>
-	  <td>We try to guess the correct serial port. If that is not possible, you have to set the correct serial port. <br />Like: <code>/dev/tty.usbmodem1411</code></td>
-  </tr>
-</table>
-
-Supported Arduino Boards
-========================
-Value | Description 
-------|------------
-uno          |Arduino Uno
-atmega328    |Arduino Duemilanove w/ ATmega328
-diecimila    |Arduino Diecimila or Duemilanove w/ ATmega168
-nano328      |Arduino Nano w/ ATmega328
-nano         |Arduino Nano w/ ATmega168
-mega2560     |Arduino Mega 2560 or Mega ADK
-mega         |Arduino Mega (ATmega1280)
-leonardo     |Arduino Leonardo
-esplora      |Arduino Esplora
-micro        |Arduino Micro
-mini328      |Arduino Mini w/ ATmega328
-mini         |Arduino Mini w/ ATmega168
-ethernet     |Arduino Ethernet
-fio          |Arduino Fio
-bt328        |Arduino BT w/ ATmega328
-bt           |Arduino BT w/ ATmega168
-LilyPadUSB   |LilyPad Arduino USB
-lilypad328   |LilyPad Arduino w/ ATmega328
-lilypad      |LilyPad Arduino w/ ATmega168
-pro5v328     |Arduino Pro or Pro Mini (5V, 16 MHz) w/ ATmega328
-pro5v        |Arduino Pro or Pro Mini (5V, 16 MHz) w/ ATmega168
-pro328       |Arduino Pro or Pro Mini (3.3V, 8 MHz) w/ ATmega328
-pro          |Arduino Pro or Pro Mini (3.3V, 8 MHz) w/ ATmega168
-atmega168    |Arduino NG or older w/ ATmega168
-atmega8      |Arduino NG or older w/ ATmega8
-robotControl |Arduino Robot Control
-robotMotor   |Arduino Robot Motor
-
-Bleeding Edge
-=============
-For the adventurous
-
-    git clone git://github.com/nasser/arduino.tmbundle.git ~/Library/Application\ Support/TextMate/Bundles/Arduino.tmbundle
-    
-Changes
-=======
-1.0a
-----
-* Fixed for Arduino 1.0
-* Improved local help command
-* Changed versioning scheme to match Arduino's. This bundle's version will always be equal to the version of Arduino it is most compatible with.
-
-0.21a
-----
-* Added snippets for common methods
-* Added an Arduino project template
-* Altered the monitor script - it's now aware of your USB ports
-
-0.2a
-----
-* Compile/upload bug fixed
-* Syntax highlighting added
-* Local help added
-* Initial Watch Serial Port implementation
-* More intelligent Makefile with environment variable overrides
-
-0.1a
-----
-* Initial release, basic implementation of compiling/uploading
+`Support/language_urls.txt` maps language keywords to docs pages for the
+Lookup command; refresh it from the live docs with
+`sh Support/update_language_urls.sh`.

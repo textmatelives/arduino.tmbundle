@@ -1,42 +1,70 @@
 #!/bin/bash
-set -- /dev/*usb*
-# make sure there's a usb port
-if [ -r "$1" ]; then
-  
-  # get the list of USB ports
-  dev_list=(`ls /dev/*usb*`)
-  
-  # echo them out with their index
-  counter=0
-  for filename in "${dev_list[@]}"; do
-    echo "${counter}. ${filename:5}"
-    counter=`expr $counter + 1`
-  done
-  
-  # ask the user which port they'd like to monitor
-  echo "Which port would you like to monitor? [enter digit then enter, defaults to zero]:"
-  read dev_port
-  
-  # if they didn't supply one, just use zero
-  if [ -n dev_port ]; then
-    dev_port=0
-  fi
-  
-  # ask them what baud they'd like to use
-  echo "Enter the baud rate [defaults to 9600]:"
-  read dev_baud
-  
-  # if they didn't supply one, just use 9600
-  if [ -n dev_baud ]; then
-    dev_baud=9600
-  fi
-  
-  # give them a heads up
-  echo "Monitoring ${dev_list[$dev_port]:5} on ${dev_baud}"
-  
-  # start monitoring
-  screen ${dev_list[$dev_port]} ${dev_baud}
-  
-else 
-  echo "No USB ports found"
-fi 
+# Serial monitor launcher. Runs in a fresh Terminal/iTerm window (no TM env),
+# so the sketch dir (plus any explicit port/baud) arrives as arguments:
+#   Monitor [SKETCHDIR] [PORT] [BAUD]
+AB="$(dirname "$0")/bin/arduino-build"
+eval "$("$AB" monitor-resolve "${1:-}" "${2:-}" "${3:-}")" || exit 1
+[ -z "$PORT" ] && [ -z "$PORT_GUESS" ] && { echo "No port -- plug a board in."; exit 1; }
+[ -z "$PORT" ] && { read -p "Port? [$PORT_GUESS] " P; PORT="${P:-$PORT_GUESS}"; }
+[ -n "$PORT" ] || { echo "No port -- plug a board in."; exit 1; }
+# Absolute fallback: TextMate's PATH may not include /usr/sbin.
+LSOF="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
+HELD="$("$LSOF" -t "$PORT" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+if [ -n "$HELD" ]; then
+	MINE="$(cat "/tmp/arduino-tmbundle-monitor.$(basename "$PORT").pid" 2>/dev/null || true)"
+	case " $HELD " in
+		*" $MINE "*) echo "$PORT is already open in another Arduino monitor window -- close that window first." ;;
+		*) echo "$PORT is busy (held by pid $HELD -- close it and try again)." ;;
+	esac
+	exit 1
+fi
+if [ -z "$BAUD" ]; then
+	BAUD="$BAUD_GUESS"
+	SKETCH=0
+	if [ -n "${1:-}" ] && [ -d "$1" ]; then ls "$1"/*.ino >/dev/null 2>&1 && SKETCH=1; fi
+	if [ "$SKETCH" = 1 ]; then
+		echo "Baud $BAUD (default -- add Serial.begin(...) to set it)"
+	else
+		echo "Baud $BAUD (default -- no sketch here; bring your sketch to the front and re-run for its rate)"
+	fi
+fi
+FROM="$SRC_BAUD"
+[ "$FROM" = "not set" ] && FROM="default"
+echo "Port $PORT at $BAUD (from $FROM)."
+HP="$(dirname "$0")/bin/port_health"
+if [ -x "$HP" ]; then
+	verdict=skip; bytes=0; rate=0; limit=0; note=""
+	while IFS= read -r line; do
+		case "$line" in
+			verdict=*) verdict=${line#verdict=};;
+			bytes=*) bytes=${line#bytes=};;
+			rate=*) rate=${line#rate=};;
+			limit=*) limit=${line#limit=};;
+			note=*) note=${line#note=};;
+		esac
+	done < <("$HP" probe --port "$PORT" --baud "$BAUD")
+	case "$verdict" in
+		wedged)
+			echo "The adapter on $PORT is wedged."
+			echo "Sample: $rate bytes/s, almost all of them 00 or 80, faster than $BAUD can carry ($limit bytes/s)."
+			echo "That is not sketch output. The monitor would show it as ????."
+			echo "Unplug the board and plug it back in, then run Monitor again."
+			echo "That restarts the USB chip. Changing USB sockets does nothing extra."
+			exit 1;;
+		garbage)
+			echo "$PORT is sending bytes that are not text at $BAUD (from $FROM)."
+			echo "This is usually the wrong baud. $bytes bytes arrived in the sample, at $rate bytes/s."
+			echo "Starting the monitor anyway.";;
+		skip)
+			[ -n "$note" ] && [ ! -e "$PORT" ] && echo "Could not sample $PORT ($note).";;
+	esac
+fi
+CLI="$("$AB" cli)" || exit 1
+echo "Monitoring $PORT at $BAUD"
+echo $$ > "/tmp/arduino-tmbundle-monitor.$(basename "$PORT").pid"
+if command -v rlwrap >/dev/null; then
+	exec rlwrap -H "$HOME/.arduino-monitor-history" "$CLI" monitor -p "$PORT" -c "baudrate=$BAUD"
+else
+	echo "Tip: brew install rlwrap for up-arrow command history."
+	exec "$CLI" monitor -p "$PORT" -c "baudrate=$BAUD"
+fi
