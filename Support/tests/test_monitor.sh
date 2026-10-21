@@ -28,7 +28,7 @@ chmod +x "$TMP/fakebin/arduino-cli"
 printf '#!/bin/sh\necho "RLWRAP CALLED: $@"\n' > "$TMP/fakebin/rlwrap"
 chmod +x "$TMP/fakebin/rlwrap"
 export HOME="$TMP/fakehome" && mkdir -p "$HOME"
-rm -f /tmp/arduino-tmbundle-monitor.cu.test1.pid
+rm -f ${TMPDIR:-/tmp}/arduino-tmbundle-monitor.cu.test1.pid
 
 # rlwrap missing: tip printed, plain cli exec'd.
 mv "$TMP/fakebin/rlwrap" "$TMP/rlwrap.hidden"
@@ -64,19 +64,21 @@ check "no port prompt" "" "$(printf '%s\n' "$OUT" | grep 'Port? ' || true)"
 # Several ports: keep the prompt, Enter accepts the guess.
 OUT="$(printf '\n' | STUB_PORT="" STUB_PGUESS="/dev/cu.guess" PATH="$TMP/fakebin:/usr/bin:/bin" "$TMP/monsupport/Monitor" "$TMP" 2>&1)"
 check "multi-port keeps prompt" "CLI CALLED: monitor -p /dev/cu.guess -c baudrate=115200" "$(printf '%s\n' "$OUT" | grep '^CLI CALLED:')"
-rm -f /tmp/arduino-tmbundle-monitor.cu.guess.pid
+rm -f ${TMPDIR:-/tmp}/arduino-tmbundle-monitor.cu.guess.pid
 
 # Port held by a stranger: refuse, name the pid, launch nothing.
 HOLD="$TMP/held"; sleep 8 >"$HOLD" 2>/dev/null & HPID=$!
 OUT="$(STUB_PORT="$HOLD" PATH="$TMP/fakebin:/usr/bin:/bin" "$TMP/monsupport/Monitor" "$TMP" </dev/null 2>&1)"
 check "held port refuses" "0" "$(printf '%s\n' "$OUT" | grep -q "is busy (held by pid $HPID" && echo 0 || echo 1)"
 check "held port launches nothing" "" "$(printf '%s\n' "$OUT" | grep '^CLI CALLED:' || true)"
-echo "$HPID" > /tmp/arduino-tmbundle-monitor.held.pid
+check "held port names kill" "0" "$(printf '%s\n' "$OUT" | grep -qF "or run: kill $HPID" && echo 0 || echo 1)"
+echo "$HPID" > ${TMPDIR:-/tmp}/arduino-tmbundle-monitor.held.pid
 OUT="$(STUB_PORT="$HOLD" PATH="$TMP/fakebin:/usr/bin:/bin" "$TMP/monsupport/Monitor" "$TMP" </dev/null 2>&1)"
 check "own monitor named" "0" "$(printf '%s\n' "$OUT" | grep -q 'already open in another Arduino monitor window' && echo 0 || echo 1)"
+check "own monitor names Ctrl-C" "0" "$(printf '%s\n' "$OUT" | grep -qF 'press Ctrl-C there' && echo 0 || echo 1)"
 kill $HPID 2>/dev/null || true
 wait $HPID 2>/dev/null || true
-rm -f /tmp/arduino-tmbundle-monitor.held.pid
+rm -f ${TMPDIR:-/tmp}/arduino-tmbundle-monitor.held.pid
 
 # Wedged adapter: say so and do not start the monitor.
 cat > "$TMP/monsupport/bin/port_health" << 'EOF'
@@ -93,6 +95,6 @@ check "wedge names the port" "The adapter on /dev/cu.test1 is wedged." "$(printf
 check "wedge says unplug" "Unplug the board and plug it back in, then run Monitor again." "$(printf '%s\n' "$OUT" | grep '^Unplug')"
 check "wedge does not launch" "" "$(printf '%s\n' "$OUT" | grep '^CLI CALLED:' || true)"
 
-rm -f /tmp/arduino-tmbundle-monitor.cu.test1.pid
+rm -f ${TMPDIR:-/tmp}/arduino-tmbundle-monitor.cu.test1.pid
 echo "--- $PASS passed, $FAIL failed ---"
 [ "$FAIL" -eq 0 ]

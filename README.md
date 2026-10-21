@@ -19,6 +19,14 @@ no Java IDE needed, any board with a CLI core works (AVR, ESP32, ...).
    Single-board setups (e.g. an Uno) work with no configuration:
    the port and board are auto-detected from `arduino-cli board list`.
 
+## Tested hardware
+
+The ESP32 path is exercised regularly: Select Board, compile, upload, and
+the serial monitor. AVR (Uno and friends) goes through the same code but
+has not been run on real hardware yet -- if you have one, please try it
+and [report back](https://github.com/textmatelives/arduino.tmbundle/issues)
+so we know what works.
+
 ## Usage
 
 * **Bundles > Arduino > Select Board** Set the board for the current sketch

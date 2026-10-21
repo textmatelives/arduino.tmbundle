@@ -11,10 +11,10 @@ eval "$("$AB" monitor-resolve "${1:-}" "${2:-}" "${3:-}")" || exit 1
 LSOF="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
 HELD="$("$LSOF" -t "$PORT" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 if [ -n "$HELD" ]; then
-	MINE="$(cat "/tmp/arduino-tmbundle-monitor.$(basename "$PORT").pid" 2>/dev/null || true)"
+	MINE="$(cat "${TMPDIR:-/tmp}/arduino-tmbundle-monitor.$(basename "$PORT").pid" 2>/dev/null || true)"
 	case " $HELD " in
-		*" $MINE "*) echo "$PORT is already open in another Arduino monitor window -- close that window first." ;;
-		*) echo "$PORT is busy (held by pid $HELD -- close it and try again)." ;;
+		*" $MINE "*) echo "$PORT is already open in another Arduino monitor window -- press Ctrl-C there (or close that window), then try again." ;;
+		*) echo "$PORT is busy (held by pid $HELD -- quit that program, or run: kill $HELD -- then try again)." ;;
 	esac
 	exit 1
 fi
@@ -61,7 +61,7 @@ if [ -x "$HP" ]; then
 fi
 CLI="$("$AB" cli)" || exit 1
 echo "Monitoring $PORT at $BAUD"
-echo $$ > "/tmp/arduino-tmbundle-monitor.$(basename "$PORT").pid"
+echo $$ > "${TMPDIR:-/tmp}/arduino-tmbundle-monitor.$(basename "$PORT").pid"
 if command -v rlwrap >/dev/null; then
 	exec rlwrap -H "$HOME/.arduino-monitor-history" "$CLI" monitor -p "$PORT" -c "baudrate=$BAUD"
 else

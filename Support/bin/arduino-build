@@ -38,7 +38,7 @@ need_cli() {
 		fi
 	fi
 }
-CACHE_DIR="${ARDUINO_CACHE_DIR:-/tmp}"
+CACHE_DIR="${ARDUINO_CACHE_DIR:-${TMPDIR:-/tmp}}"
 
 # Full `board listall` JSON, cached. Valid while newer than the installed
 # cores and package index, so core installs/updates invalidate it. Falls
@@ -53,9 +53,10 @@ listall_json() {
 	fi
 	[ -f "$C" ] && cat "$C" || fail "'arduino-cli board listall' failed"
 }
-PY="$(command -v python3)" || fail "python3 not found (macOS ships it -- is PATH broken?)"
+PY="$(command -v python3)" || fail "python3 not found (install the Xcode Command Line Tools: xcode-select --install)"
 
-# Prints PORT=... and FQBN=... for eval. Auto-picks only when the detected
+# Prints quoted PORT and FQBN lines for eval. The python block is shell
+# single-quoted: do not use a bare quote in it. Auto-picks only when the detected
 # board is unambiguous and buildable; otherwise fails LOUD with the fix.
 # An explicit TM_ARDUINO_FQBN is always trusted. USB serial ports matching
 # no known board (clone chips with blank IDs) count as unrecognized hardware,
@@ -63,8 +64,8 @@ PY="$(command -v python3)" || fail "python3 not found (macOS ships it -- is PATH
 resolve() {
 	# Fully configured: trust it, skip the ~1.5s hardware scan.
 	if [ -n "${TM_ARDUINO_FQBN:-}" ] && [ -n "${TM_ARDUINO_PORT:-}" ]; then
-		echo "PORT=${TM_ARDUINO_PORT}"
-		echo "FQBN=${TM_ARDUINO_FQBN}"
+		echo "PORT='${TM_ARDUINO_PORT}'"
+		echo "FQBN='${TM_ARDUINO_FQBN}'"
 		return 0
 	fi
 	JSON="$("$CLI" board list --format json 2>/dev/null)" || fail "'arduino-cli board list' failed"
@@ -100,7 +101,7 @@ if not cands and not unmatched:
     sys.exit("arduino-build: no boards detected (plug one in, then run Select Board to pick it)")
 if not cands:  # unrecognized USB only
     if want_fqbn and len(unmatched) == 1:
-        print("PORT=%s\nFQBN=%s" % (unmatched[0], want_fqbn))
+        print("PORT='\''%s'\''\nFQBN='\''%s'\''" % (unmatched[0], want_fqbn))
         sys.exit()
     if want_fqbn:
         sys.exit("arduino-build: more than one unrecognized USB device (%s). Unplug all but your board and try again." % ", ".join(unmatched))
@@ -111,7 +112,7 @@ if want_fqbn:
         addrs = unmatched
     if not addrs and len(unmatched) > 1:
         sys.exit("arduino-build: more than one unrecognized USB device (%s). Unplug all but your board and try again." % ", ".join(unmatched))
-    print("PORT=%s\nFQBN=%s" % ((addrs or [cands[0][0]])[0], want_fqbn))
+    print("PORT='\''%s'\''\nFQBN='\''%s'\''" % ((addrs or [cands[0][0]])[0], want_fqbn))
     sys.exit()
 def show(fqbn):
     if fqbn in names:
@@ -122,7 +123,7 @@ known_fqbns = sorted(set(f for a, f, k, d in cands if k))
 aliases = sorted(set(f for a, f, k, d in cands if not k))
 if len(known_fqbns) == 1 and not aliases and not unmatched:
     addr = next(a for a, f, k, d in cands if f == known_fqbns[0])
-    print("PORT=%s\nFQBN=%s" % (addr, known_fqbns[0]))
+    print("PORT='\''%s'\''\nFQBN='\''%s'\''" % (addr, known_fqbns[0]))
     sys.exit()
 guesses = [show(f) for f in known_fqbns + aliases]
 guesses += ["unrecognized USB on %s" % a for a in unmatched]
@@ -159,7 +160,7 @@ is_our_monitor_cmd() {
 # Free PORT for upload: close our own monitor if it holds it (verified by
 # PID file + command line), then fail loud on any remaining (strange) holder.
 free_port() {
-	PF="/tmp/arduino-tmbundle-monitor.$(basename "$1").pid"
+	PF="${TMPDIR:-/tmp}/arduino-tmbundle-monitor.$(basename "$1").pid"
 	if [ -f "$PF" ]; then
 		MPID="$(cat "$PF" 2>/dev/null)"
 		if [ -n "$MPID" ] && is_our_monitor_cmd "$(ps -p "$MPID" -o command= 2>/dev/null)" "$1"; then
@@ -170,8 +171,12 @@ free_port() {
 			rm -f "$PF"
 		fi
 	fi
-	STILL="$(lsof -t "$1" 2>/dev/null || true)"
-	[ -n "$STILL" ] && fail "$1 is busy (held by pid $(echo "$STILL" | tr '\n' ' ')-- close it and upload again)"
+	LSOF="$(command -v lsof 2>/dev/null || echo /usr/sbin/lsof)"
+	STILL="$("$LSOF" -t "$1" 2>/dev/null || true)"
+	if [ -n "$STILL" ]; then
+		PIDS="$(echo "$STILL" | tr '\n' ' ' | sed 's/ $//')"
+		fail "$1 is busy (held by pid $PIDS -- quit that program, or run: kill $PIDS -- then upload again)"
+	fi
 	return 0
 }
 sketch_baud() { grep -Eho 'Serial\.begin\([0-9]+' "$1"/*.ino 2>/dev/null | head -1 | grep -Eo '[0-9]+'; }

@@ -27,7 +27,7 @@ end
 
 # Unambiguous setup (e.g. one Uno): no questions, just write it.
 det = `#{e_sh(ab)} detect 2&gt;&amp;1`
-if $?.success? &amp;&amp; det =~ /^FQBN=(.+)$/
+if $?.success? &amp;&amp; det =~ /^FQBN='?([^'\r\n]+)'?$/
   out = `#{e_sh(ab)} use-board #{e_sh(dir)} #{e_sh($1)} 2&gt;&amp;1`
   TextMate::UI.tool_tip(out.strip)
   exit 0

@@ -90,11 +90,11 @@ export ARDUINO_CLI="$TMP/arduino-cli"
 export ARDUINO_CACHE_DIR="$TMP/cache"
 export STUB_JSON="$TMP/one.json"
 
-check "single board auto-picks" "PORT=/dev/cu.usbmodem1
-FQBN=arduino:avr:uno" "$(env -u TM_ARDUINO_FQBN -u TM_ARDUINO_PORT "$BIN" detect)"
+check "single board auto-picks" "PORT='/dev/cu.usbmodem1'
+FQBN='arduino:avr:uno'" "$(env -u TM_ARDUINO_FQBN -u TM_ARDUINO_PORT "$BIN" detect)"
 
-check "explicit port picks its board" "PORT=/dev/cu.usbmodem2
-FQBN=esp32:esp32:esp32" "$(STUB_JSON=$TMP/two.json TM_ARDUINO_PORT=/dev/cu.usbmodem2 "$BIN" detect)"
+check "explicit port picks its board" "PORT='/dev/cu.usbmodem2'
+FQBN='esp32:esp32:esp32'" "$(STUB_JSON=$TMP/two.json TM_ARDUINO_PORT=/dev/cu.usbmodem2 "$BIN" detect)"
 
 STUB_JSON=$TMP/two.json "$BIN" detect >/dev/null 2>&1
 check "two boards fails loud" "1" "$?"
@@ -112,11 +112,11 @@ check "alias message names friendly boards" "0" "$?"
 STUB_JSON=$TMP/alias.json "$BIN" detect 2>&1 | grep -q "esp32_family"
 check "alias message hides board IDs" "1" "$?"
 
-check "explicit FQBN trusted over alias" "PORT=/dev/cu.usbmodem1
-FQBN=esp32:esp32:esp32" "$(STUB_JSON=$TMP/alias.json TM_ARDUINO_FQBN=esp32:esp32:esp32 "$BIN" detect)"
+check "explicit FQBN trusted over alias" "PORT='/dev/cu.usbmodem1'
+FQBN='esp32:esp32:esp32'" "$(STUB_JSON=$TMP/alias.json TM_ARDUINO_FQBN=esp32:esp32:esp32 "$BIN" detect)"
 
-check "unrecognized USB takes explicit board" "PORT=/dev/cu.usbserial-0001
-FQBN=esp32:esp32:esp32" "$(STUB_JSON=$TMP/unmatched.json TM_ARDUINO_FQBN=esp32:esp32:esp32 "$BIN" detect)"
+check "unrecognized USB takes explicit board" "PORT='/dev/cu.usbserial-0001'
+FQBN='esp32:esp32:esp32'" "$(STUB_JSON=$TMP/unmatched.json TM_ARDUINO_FQBN=esp32:esp32:esp32 "$BIN" detect)"
 STUB_JSON=$TMP/unmatched.json "$BIN" detect >/dev/null 2>&1
 check "unrecognized USB fails loud" "1" "$?"
 STUB_JSON=$TMP/unmatched.json "$BIN" detect 2>&1 | grep -q "do not recognize it.*Select Board"
@@ -126,8 +126,9 @@ check "two unknowns refuse to guess" "0" "$?"
 STUB_JSON=$TMP/unmatched.json TM_ARDUINO_PORT=/dev/cu.usbserial-0001 "$BIN" detect 2>&1 | grep -q "cannot tell which board is on"
 check "port-only on unknown asks for board" "0" "$?"
 
-check "explicit port+fqbn skips scan" "PORT=/dev/cu.x
-FQBN=y:z" "$(STUB_JSON=$TMP/none.json TM_ARDUINO_PORT=/dev/cu.x TM_ARDUINO_FQBN=y:z "$BIN" detect)"
+check "explicit port+fqbn skips scan" "PORT='/dev/cu.x'
+FQBN='y:z'" "$(STUB_JSON=$TMP/none.json TM_ARDUINO_PORT=/dev/cu.x TM_ARDUINO_FQBN=y:z "$BIN" detect)"
+eval "$(STUB_JSON=$TMP/none.json TM_ARDUINO_PORT=/dev/cu.x TM_ARDUINO_FQBN=y:z "$BIN" detect)" && check "detect output is eval-safe" "/dev/cu.x|y:z" "$PORT|$FQBN"
 
 TM_ARDUINO_PORT=/dev/cu.bogus "$BIN" detect >/dev/null 2>&1
 check "bogus port fails" "1" "$?"
@@ -310,6 +311,12 @@ isours "screen /dev/cu.x 115200" /dev/cu.x
 check "stranger rejected" "1" "$?"
 isours "" /dev/cu.x
 check "dead pid rejected" "1" "$?"
+freeport() { ( ARDUINO_BUILD_SOURCED=1; ARDUINO_CLI="$TMP/arduino-cli"; source "$BIN"; free_port "$1" ); }
+HOLD2="$TMP/held2"; sleep 8 >"$HOLD2" 2>/dev/null & HP2=$!
+freeport "$HOLD2" 2>&1 | grep -qF "or run: kill $HP2"
+check "free_port names the kill" "0" "$?"
+kill $HP2 2>/dev/null || true
+wait $HP2 2>/dev/null || true
 
 printf '#!/bin/bash\necho "Homebrew 9.9.9"\n' > "$TMP/fakebrew" && chmod +x "$TMP/fakebrew"
 cat > "$TMP/cores_both.json" <<'JSON'
@@ -371,8 +378,10 @@ check "doctor decline quits" "1" "$?"
 check "version prints" "0" "$?"
 
 check "listall cached" "0" "$([ -f "$TMP/cache/arduino-listall-cache.json" ] && echo 0 || echo 1)"
+env -u ARDUINO_CACHE_DIR -u TM_ARDUINO_FQBN -u TM_ARDUINO_PORT STUB_JSON="$TMP/one.json" TMPDIR="$TMP/tmproot" "$BIN" detect >/dev/null 2>&1
+check "default cache honors TMPDIR" "0" "$([ -f "$TMP/tmproot/arduino-listall-cache.json" ] && echo 0 || echo 1)"
 echo "not json anymore" > "$TMP/known.json"
-check "cache survives CLI breakage" "PORT=/dev/cu.usbmodem1
-FQBN=arduino:avr:uno" "$(env -u TM_ARDUINO_FQBN -u TM_ARDUINO_PORT "$BIN" detect)"
+check "cache survives CLI breakage" "PORT='/dev/cu.usbmodem1'
+FQBN='arduino:avr:uno'" "$(env -u TM_ARDUINO_FQBN -u TM_ARDUINO_PORT "$BIN" detect)"
 
 exit $FAIL
