@@ -7,12 +7,16 @@
 	<key>beforeRunningCommand</key>
 	<string>saveModifiedFiles</string>
 	<key>command</key>
-	<string>#!/usr/bin/env ruby -wEutf-8
+	<string>#!/usr/bin/env ruby -Eutf-8
+$VERBOSE = nil # Bundle Support is noisy under macOS Ruby 2.6; these scripts need no warnings.
 require ENV["TM_SUPPORT_PATH"] + "/lib/tm/executor"
 
-script_args = ["-e","-f","#{ENV['TM_BUNDLE_SUPPORT']}/Makefile"]
+abort "Save the sketch first -- arduino-cli needs the sketch folder" unless ENV["TM_FILEPATH"]
+sketch = File.dirname(ENV["TM_FILEPATH"])
 
-TextMate::Executor.run("/Applications/Arduino.app/Contents/Resources/Java/hardware/tools/avr/bin/make",  :script_args =&gt; script_args)
+TextMate::Executor.run("#{ENV['TM_BUNDLE_SUPPORT']}/bin/arduino-build",
+  :script_args =&gt; ["compile", sketch], :verb =&gt; "Compiling",
+  :use_hashbang =&gt; false)
 </string>
 	<key>input</key>
 	<string>none</string>
@@ -21,7 +25,7 @@ TextMate::Executor.run("/Applications/Arduino.app/Contents/Resources/Java/hardwa
 	<key>keyEquivalent</key>
 	<string>@b</string>
 	<key>name</key>
-	<string>Compile</string>
+	<string>Verify Sketch (compile)</string>
 	<key>outputCaret</key>
 	<string>afterOutput</string>
 	<key>outputFormat</key>

@@ -5,17 +5,37 @@
 	<key>beforeRunningCommand</key>
 	<string>nop</string>
 	<key>command</key>
-	<string>TM_BUNDLE_SUPPORT_ESC=$(echo $TM_BUNDLE_SUPPORT | sed '/Support/s/ /\\\\ /')
- osascript -e "tell application \"Terminal\" to do script \"${TM_BUNDLE_SUPPORT_ESC}/Monitor\""</string>
+	<string>#!/bin/bash
+# https://arduino.github.io/arduino-cli/1.5/commands/arduino-cli_monitor/
+[[ -f "${TM_SUPPORT_PATH}/lib/bash_init.sh" ]] &amp;&amp; . "${TM_SUPPORT_PATH}/lib/bash_init.sh"
+
+# Paths travel via argv + `quoted form of`, so spaces/quotes in them cannot
+# break AppleScript string parsing (a hand-escaped `\ ` is a -2741 error).
+osascript \
+  -e 'on run argv' \
+  -e 'tell application "Terminal"' \
+  -e 'activate' \
+  -e 'do script (quoted form of (item 1 of argv &amp; "/Monitor") &amp; " " &amp; quoted form of item 2 of argv &amp; " " &amp; quoted form of item 3 of argv &amp; " " &amp; quoted form of item 4 of argv)' \
+  -e 'end tell' \
+  -e 'end run' \
+  -- "$TM_BUNDLE_SUPPORT" "${TM_DIRECTORY:-}" "${TM_ARDUINO_PORT:-}" "${TM_ARDUINO_BAUD:-}"</string>
 	<key>input</key>
 	<string>none</string>
+	<key>inputFormat</key>
+	<string>text</string>
 	<key>name</key>
-	<string>Terminal</string>
-	<key>output</key>
+	<string>Monitor with Terminal.app</string>
+	<key>outputCaret</key>
+	<string>afterOutput</string>
+	<key>outputFormat</key>
+	<string>text</string>
+	<key>outputLocation</key>
 	<string>discard</string>
 	<key>scope</key>
 	<string>source.c++.arduino</string>
 	<key>uuid</key>
 	<string>CA52EB7C-9E55-41E7-8A3B-922497F95BD1</string>
+	<key>version</key>
+	<integer>2</integer>
 </dict>
 </plist>
